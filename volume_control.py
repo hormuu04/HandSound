@@ -29,8 +29,11 @@ class VolumeController:
         # เพิ่มตัวแปรสำหรับติดตามสถานะ Mute
         self.is_muted = False
         self.last_volume = None  # เก็บค่าระดับเสียงก่อน mute
-        self.mute_gesture_count = 0  # นับเฟรมที่ตรวจพบท่ากำมือ
-        self.mute_threshold = 10  # จำนวนเฟรมขั้นต่ำที่ต้องตรวจพบท่ากำมือ
+        
+        # ตัวแปรสำหรับติดตามเวลาการกำมือ
+        self.fist_start_time = None  # เวลาเริ่มกำมือ
+        self.fist_hold_duration = 0  # ระยะเวลาที่กำมือค้าง
+        self.fist_action_triggered = False  # ป้องกันการทริกเกอร์ซ้ำ
         
         # ตั้งค่าหน้าต่างแสดงผล
         self.window_name = 'ควบคุมเสียงด้วยมือ'
@@ -154,6 +157,7 @@ class VolumeController:
     def process_frame(self, frame):
         """ประมวลผลแต่ละเฟรมและควบคุมเสียง"""
         hand_landmarks = self.get_hand_landmarks(frame)
+        current_time = cv2.getTickCount() / cv2.getTickFrequency()  # เวลาปัจจุบัน
         
         if hand_landmarks:
             for landmarks in hand_landmarks:
@@ -163,39 +167,52 @@ class VolumeController:
                 
                 # ตรวจสอบท่ากำมือ
                 if self.is_fist(landmarks):
-                    self.mute_gesture_count += 1
-                    if self.mute_gesture_count >= self.mute_threshold:
-                        self.toggle_mute()
-                        self.mute_gesture_count = 0  # รีเซ็ตตัวนับ
+                    if self.fist_start_time is None:
+                        self.fist_start_time = current_time
+                        self.fist_action_triggered = False
+                    
+                    self.fist_hold_duration = current_time - self.fist_start_time
+                    
+                    # แสดงเวลาที่กำมือค้าง
+                    if not self.fist_action_triggered:
+                        remaining_time = max(0, 2 - self.fist_hold_duration)
+                        frame = self.put_thai_text(
+                            frame,
+                            f"กำมือค้าง: {remaining_time:.1f} วินาที",
+                            (10, 50),
+                            font_size=24
+                        )
+                    
+                    # เมื่อกำมือครบ 2 วินาที
+                    if self.fist_hold_duration >= 2 and not self.fist_action_triggered:
+                        self.toggle_mute()  # เปิด/ปิดเสียง
+                        self.fist_action_triggered = True  # ป้องกันการทริกเกอร์ซ้ำ
                 else:
-                    self.mute_gesture_count = 0  # รีเซ็ตตัวนับเมื่อไม่ใช่ท่ากำมือ
+                    # รีเซ็ตเมื่อไม่ได้กำมือ
+                    self.fist_start_time = None
+                    self.fist_hold_duration = 0
                 
                 # ถ้าไม่ได้ปิดเสียง ให้ควบคุมระดับเสียงตามปกติ
                 if not self.is_muted:
                     # ใช้ปลายนิ้วชี้และนิ้วโป้งในการควบคุม
-                    thumb_tip = landmarks.landmark[4]  # นิ้วโป้ง
-                    index_tip = landmarks.landmark[8]  # นิ้วชี้
+                    thumb_tip = landmarks.landmark[4]
+                    index_tip = landmarks.landmark[8]
                     
-                    # แปลงพิกัดเป็นพิกเซล
                     frame_height, frame_width = frame.shape[:2]
                     thumb_x, thumb_y = int(thumb_tip.x * frame_width), int(thumb_tip.y * frame_height)
                     index_x, index_y = int(index_tip.x * frame_width), int(index_tip.y * frame_height)
                     
-                    # วาดเส้นและวงกลมระหว่างนิ้ว
                     cv2.line(frame, (thumb_x, thumb_y), (index_x, index_y), (0, 255, 0), 2)
                     cv2.circle(frame, (thumb_x, thumb_y), 10, (255, 0, 0), cv2.FILLED)
                     cv2.circle(frame, (index_x, index_y), 10, (255, 0, 0), cv2.FILLED)
                     
-                    # คำนวณระยะห่างและปรับระดับเสียง
                     distance = self.calculate_distance((thumb_x, thumb_y), (index_x, index_y))
                     
-                    # แปลงระยะห่างเป็นระดับเสียง (ปรับค่าตามความเหมาะสม)
-                    min_distance = 20   # ระยะห่างต่ำสุด (เสียงเบาสุด)
-                    max_distance = 200  # ระยะห่างสูงสุด (เสียงดังสุด)
+                    min_distance = 20
+                    max_distance = 200
                     
-                    # ปรับให้อยู่ในช่วง 0-100
                     volume_percent = np.interp(distance, [min_distance, max_distance], [0, 100])
-                    volume_percent = min(max(volume_percent, 0), 100)  # จำกัดช่วง 0-100
+                    volume_percent = min(max(volume_percent, 0), 100)
                     
                     # แปลงเป็นค่าระดับเสียงและตั้งค่า
                     volume_db = np.interp(volume_percent, [0, 100], [self.volume_range[0], self.volume_range[1]])
@@ -223,8 +240,9 @@ class VolumeController:
         print("2. กด 'ESC'")
         print("3. กด Ctrl+C ที่หน้าต่าง Terminal")
         print("\nวิธีใช้งาน:")
-        print("1. ใช้นิ้วโป้งและนิ้วชี้ควบคุมระดับเสียง")
-        print("2. กำมือค้างไว้เพื่อ เปิด/ปิด เสียง")
+        print("1. ใช้นิ้วโป้งและนิ้วชี้ในการควบคุมระดับเสียง")
+        print("2. ยิ่งแยกนิ้วห่างกัน เสียงจะยิ่งดัง")
+        print("3. กด 'q' เพื่อออกจากโปรแกรม\n")
         
         try:
             while True:
